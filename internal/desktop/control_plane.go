@@ -1415,7 +1415,7 @@ func (c *ControlPlane) Close() error {
 		if workflowDone != nil {
 			<-workflowDone
 		}
-		if c.mcpClient != nil {
+		if !turnDrainPending && c.mcpClient != nil {
 			_ = c.mcpClient.Close()
 		}
 		if c.projectPreparation != nil {
@@ -1518,7 +1518,7 @@ func (c *ControlPlane) Close() error {
 				drainCancel()
 			}
 		}
-		if c.codeIntelManager != nil {
+		if !turnDrainPending && c.codeIntelManager != nil {
 			shutdownContext, shutdownCancel := context.WithTimeout(
 				context.Background(), codeintel.MaximumShutdownGracePeriod)
 			c.closeErr = errors.Join(c.closeErr, c.codeIntelManager.Close(shutdownContext))
@@ -1536,13 +1536,23 @@ func (c *ControlPlane) Close() error {
 				c.terminalManager.Shutdown())
 		}
 		if commandDrainPending || turnDrainPending {
-			// Keep the borrowed store alive if a stalled completion exceeded the
-			// visible shutdown budget. The last writer releases it after draining;
+			// Keep the borrowed store and runtime managers alive if a stalled completion exceeded the
+			// visible shutdown budget. The last writer releases them after draining;
 			// a process exit also closes its OS handles.
 			runtimes, turns, stateStore := c.commandRuntimeSet, c.threadTurns, c.stateStore
+			mcpClient, codeIntel := c.mcpClient, c.codeIntelManager
 			go func() {
 				if turnDrainPending {
 					_ = turns.Shutdown(context.Background())
+					if mcpClient != nil {
+						_ = mcpClient.Close()
+					}
+					if codeIntel != nil {
+						drainContext, drainCancel := context.WithTimeout(
+							context.Background(), codeintel.MaximumShutdownGracePeriod)
+						_ = codeIntel.Close(drainContext)
+						drainCancel()
+					}
 				}
 				if commandDrainPending {
 					_ = runtimes.Shutdown(context.Background())
