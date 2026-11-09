@@ -121,8 +121,12 @@ func TestControlPlaneCloseKeepsRuntimeDependenciesUntilTurnDrain(t *testing.T) {
 		_ = intel.Close(ctx)
 	})
 	provider := &desktopDependencyDrainProvider{manager: manager, store: st, result: make(chan error, 1)}
+	workspaceRoot, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
 	if err := raw.SaveWorkspace(t.Context(), store.WorkspaceRecord{
-		ID: "dependency-workspace", Name: "Dependency workspace", RootPath: t.TempDir(), CreatedAt: time.Now().UTC(),
+		ID: "dependency-workspace", Name: "Dependency workspace", RootPath: workspaceRoot, CreatedAt: time.Now().UTC(),
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -194,10 +198,15 @@ func TestControlPlaneCloseKeepsRuntimeDependenciesUntilTurnDrain(t *testing.T) {
 		_ = turns.Shutdown(ctx)
 	})
 	go func() { defer close(turnDone); _, turnErr = turns.Execute(t.Context(), input) }()
+	var turnExitedExpected bool
 	wait := func(signal <-chan struct{}, label string) {
 		t.Helper()
 		select {
 		case <-signal:
+		case <-turnDone:
+			if !turnExitedExpected {
+				t.Fatalf("turn completed prematurely before %s: %v", label, turnErr)
+			}
 		case <-time.After(8 * time.Second):
 			t.Fatalf("did not observe %s", label)
 		}
@@ -220,12 +229,13 @@ func TestControlPlaneCloseKeepsRuntimeDependenciesUntilTurnDrain(t *testing.T) {
 	if _, err := raw.GetRun(t.Context(), run.ID); err != nil {
 		t.Errorf("ControlPlane.Close closed SQLite before host operations drained: %v", err)
 	}
-	_, intelErr := intel.InitializeServer(t.Context(), mission.WorkspaceID, t.TempDir(), "not-configured")
+	_, intelErr := intel.InitializeServer(t.Context(), mission.WorkspaceID, workspaceRoot, "not-configured")
 	if apperror.CodeOf(intelErr) != apperror.CodeNotFound {
 		t.Errorf("code intelligence closed while still borrowed by draining host operations: %v", intelErr)
 	}
 	lookupRelease.Do(func() { close(st.lookupRelease) })
 	intentRelease.Do(func() { close(st.intentRelease) })
+	turnExitedExpected = true
 	wait(turnDone, "cancelled runtime turn completion")
 	wait(rejectDone, "late intent rejection")
 	if mcpErr := <-provider.result; !errors.Is(mcpErr, context.Canceled) {
